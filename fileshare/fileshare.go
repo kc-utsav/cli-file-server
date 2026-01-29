@@ -17,6 +17,7 @@ type FileItem struct {
 	Path string
 	IsDir bool
 	Size string
+	DownloadURL string
 }
 
 const tpl = `
@@ -35,19 +36,41 @@ const tpl = `
 		}
 		.card {
 			background: white;
-			padding: 15px;
 			border-radius: 12px;
+			overflow: hidden;
 			text-align: center;
 			box-shadow: 0 2px 5px rgba(0,0,0,0.1);
 			transition: transform 0.2s;
+			display: flex;
+			flex-direction: column;
 			text-decoration: none;
 			color: #333;
-			display: block;
+		}
+		.card-content {
+			padding: 15px;
+			text-align: center;
+			flex-grow: 1;
+			text-decoration: none;
+			color: #333;
 		}
 		.card:hover { transform: translateY(-5px); box-shadow: 0 5px 15px rgba(0,0,0,0.2); }
 		.icon { font-size: 50px; margin-bottom: 10px; }
 		.name { font-weight: bold; word-break: break-word; }
 		.size { font-size: 12px; color: #888; margin-top: 5px; }
+		.actions {
+			border-top: 1px solid #eee;
+			background: #fafafa;
+			text-align: center;
+		}
+		.download-btn {
+			display: block;
+			padding: 10px;
+			color: #007bff;
+			font-weight: bold;
+			text-decoration: none;
+			font-size: 14px;
+		}
+		.download-btn:hover { background: #eef}
 		.upload-btn { display: block; max-width: 300px; margin: 20px auto; padding: 15px; background: #007bff; color: white; text-align: center; border-radius: 8px; text-decoration: none; font-weight: bold;}
 	</style>
 </head>
@@ -57,13 +80,20 @@ const tpl = `
 
 	<div class="grid">
 		{{range .}}
-		<a href="{{.Path}}" class="card">
-			<div class="icon">
-				{{if .IsDir}} 📁 {{else}} 📄 {{end}}
-			</div>
-			<div class="name">{{.Name}}</div>
-			{{if not .IsDir}} <div class="size">{{.Size}}</div> {{end}}
-		</a>
+		<div class="card">
+			<a href="{{.Path}}" class="card">
+				<div class="icon">
+					{{if .IsDir}} 📁 {{else}} 📄 {{end}}
+				</div>
+				<div class="name">{{.Name}}</div>
+				{{if not .IsDir}} <div class="size">{{.Size}}</div> {{end}}
+			</a>
+			{{if.DownloadURL}}
+			<div class="actions">
+				<a href="{{.DownloadURL}}" class="download-btn" download>Save</a>
+				</div>
+				{{end}}
+		</div>
 		{{end}}
 	</div>
 </body>
@@ -159,15 +189,21 @@ func customFileHandler(dir string) http.HandlerFunc {
 				size := ""
 				info, _ := entry.Info()
 
+				currentUrlPath := filepath.Join(r.URL.Path, entry.Name())
+				downloadUrl := ""
+
 				if !entry.IsDir() {
 					size = fmt.Sprintf("%.2f KB", float64(info.Size())/1024)
+					downloadUrl = currentUrlPath
 				}
+
 
 				items = append(items, FileItem{
 					Name: entry.Name(),
-					Path: filepath.Join(r.URL.Path, entry.Name()),
+					Path: currentUrlPath,
 					IsDir: entry.IsDir(),
 					Size: size,
+					DownloadURL: downloadUrl,
 				})
 			}
 			t, err := template.New("webpage").Parse(tpl)
