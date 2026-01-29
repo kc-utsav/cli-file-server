@@ -12,7 +12,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"github.com/grandcat/zeroconf"
 )
 
 type FileItem struct {
@@ -114,19 +117,33 @@ const tpl = `
 </html>
 `
 
-func getLocalIP() string {
-	addrs, err := net.InterfaceAddrs()
+func getLocalIP() (string, *net.Interface) {
+	interfaces, err := net.Interfaces()
 	if err != nil {
-		return ""
+		return "", nil
 	}
-	for _, address := range addrs {
-		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				return ipnet.IP.String()
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip != nil && ip.To4() != nil {
+				return ip.String(), &iface
 			}
 		}
 	}
-	return "localhost"
+	return "localhost", nil
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {
@@ -317,6 +334,37 @@ func zipHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func startMDNS(port int, ip string, iface *net.Interface) {
+
+	if iface == nil {
+		log.Println("No suitable network for mDNS")
+		return
+	}
+
+	hostName := "fileshare"
+	interfaces := []net.Interface{*iface}
+	server, err := zeroconf.RegisterProxy(
+		"FileShare",
+		"_http._tcp",
+		"local.",
+		port,
+		hostName,
+		[]string{ip},
+		[]string{"txtv=0", "lo=1", "la=2"},
+		interfaces,
+	)
+	if err != nil {
+		log.Printf("Could not start mDNS: %v", err)
+		return
+	}
+	log.Printf("mDNS active: http://%s:%d (Bound to %s)", hostName, port, iface.Name)
+
+	go func() {
+		<-make(chan struct{})
+	_ = server
+	}()
+}
+
 func main(){
 
 	portPtr := flag.String("port", "8080", "The port to run the server on")
@@ -334,11 +382,14 @@ func main(){
 	http.HandleFunc("/upload", uploadHandler)
 	http.HandleFunc("/zip", zipHandler)
 
-	ip := getLocalIP()
+	ip, iface := getLocalIP()
+
+	portInt, _ := strconv.Atoi(*portPtr)
+	startMDNS(portInt, ip, iface)
 
 	fmt.Printf("Sharing: %s\n", currentDir)
 	fmt.Printf("On Wifi: http://%s:%s\n", ip, *portPtr)
-	fmt.Printf("On PC: http://localhost:%s\n", *portPtr)
+	fmt.Printf("On domain: http://fileshare.local:%s\n", *portPtr)
 
-	log.Fatal(http.ListenAndServe(":"+*portPtr , nil))
+	log.Fatal(http.ListenAndServe("0.0.0.0:"+*portPtr , nil))
 }
