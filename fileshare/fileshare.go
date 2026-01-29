@@ -23,19 +23,20 @@ const tpl = `
 <!DOCTYPE html>
 <html>
 <head>
+	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<title>My File Server</title>
 	<style>
-		body { font-family: sans-serif; background: #f4f4f4; padding: 20px; }
+		body { font-family: -apple-system, system-ui, sans-serif; background: #f4f4f4; padding: 20px; }
 		h1 { text-align: center; color: #333; }
 		.grid {
 			display: grid;
-			grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-			gap: 20px;
+			grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+			gap: 15px;
 		}
 		.card {
 			background: white;
-			padding: 20px;
-			border-radius: 10px;
+			padding: 15px;
+			border-radius: 12px;
 			text-align: center;
 			box-shadow: 0 2px 5px rgba(0,0,0,0.1);
 			transition: transform 0.2s;
@@ -44,10 +45,10 @@ const tpl = `
 			display: block;
 		}
 		.card:hover { transform: translateY(-5px); box-shadow: 0 5px 15px rgba(0,0,0,0.2); }
-		.icon { font-size: 40px; margin-bottom: 10px; }
+		.icon { font-size: 50px; margin-bottom: 10px; }
 		.name { font-weight: bold; word-break: break-word; }
 		.size { font-size: 12px; color: #888; margin-top: 5px; }
-		.upload-btn { display: block; width: 200px; margin: 20px auto; padding: 10px; background: #007bff; color: white; text-align: center; border-radius: 5px; text-decoration: none; }
+		.upload-btn { display: block; max-width: 300px; margin: 20px auto; padding: 15px; background: #007bff; color: white; text-align: center; border-radius: 8px; text-decoration: none; font-weight: bold;}
 	</style>
 </head>
 <body>
@@ -98,6 +99,7 @@ func uploadHandler( w http.ResponseWriter, r *http.Request) {
 		html := `
 		<!DOCTYPE html>
 		<html>
+		<meta name="viewport" content="width=device-width, initial-scale=1">
 		<head><title>Upload File</title></head>
 		<body>
 			<h1>Upload a file</h1>
