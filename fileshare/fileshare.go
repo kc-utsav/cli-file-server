@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"flag"
 	"fmt"
 	"html/template"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type FileItem struct {
@@ -18,6 +20,11 @@ type FileItem struct {
 	IsDir bool
 	Size string
 	DownloadURL string
+}
+
+type BreadCrumb struct {
+	Name string
+	Link string
 }
 
 const tpl = `
@@ -75,11 +82,17 @@ const tpl = `
 	</style>
 </head>
 <body>
+	<div style="background:white; padding: 10px; margin-bottom: 20px; border-radius: 8px;">
+		{{range .Breadcrumbs}}
+			<a href="{{.Link}}" style="text-decoration: none; color: #007bff; font-weight: bold;">{{.Name}}</a>
+			<span style="color: #999;"> / </span>
+		{{end}}
+	</div>
 	<h1>📂 My Shared Files</h1>
 	<a href="/upload" class="upload-btn">Upload New File</a>
 
 	<div class="grid">
-		{{range .}}
+		{{range .Files}}
 		<div class="card">
 			<a href="{{.Path}}" class="card">
 				<div class="icon">
@@ -184,19 +197,44 @@ func customFileHandler(dir string) http.HandlerFunc {
 				return
 			}
 
+			var breadcrumbs []BreadCrumb
+			breadcrumbs = append(breadcrumbs, BreadCrumb{
+				Name: "Home",
+				Link: "/",
+			})
+
+			cleanPath := strings.Trim(r.URL.Path, "/")
+			if cleanPath != "" {
+				parts := strings.Split(cleanPath, "/")
+				currentLink := ""
+
+				for _, part := range parts {
+					currentLink = currentLink + "/" + path
+					breadcrumbs = append(breadcrumbs, BreadCrumb{
+						Name: part,
+						Link: currentLink,
+					})
+				}
+			}
+
 			var items []FileItem
 			for _, entry := range entries {
 				size := ""
 				info, _ := entry.Info()
 
-				currentUrlPath := filepath.Join(r.URL.Path, entry.Name())
-				downloadUrl := ""
 
 				if !entry.IsDir() {
 					size = fmt.Sprintf("%.2f KB", float64(info.Size())/1024)
-					downloadUrl = currentUrlPath
 				}
 
+				currentUrlPath := filepath.Join(r.URL.Path, entry.Name())
+				downloadUrl := ""
+
+				if entry.IsDir() {
+					downloadUrl = fmt.Sprintf("/zip?path=%s", currentUrlPath)
+				} else {
+					downloadUrl = currentUrlPath
+				}
 
 				items = append(items, FileItem{
 					Name: entry.Name(),
@@ -206,15 +244,74 @@ func customFileHandler(dir string) http.HandlerFunc {
 					DownloadURL: downloadUrl,
 				})
 			}
+
+			data := struct {
+				BreadCrumbs []BreadCrumb
+				Files []FileItem
+			}{
+				BreadCrumbs: breadcrumbs,
+				Files: items,
+			}
+
 			t, err := template.New("webpage").Parse(tpl)
 			if err != nil {
 				http.Error(w, "Template error", 500)
 				return
 			}
-			t.Execute(w, items)
+			t.Execute(w, data)
 			return
 		}
 		http.FileServer(http.Dir(dir)).ServeHTTP(w,r)
+	}
+}
+
+func zipHandler(w http.ResponseWriter, r *http.Request) {
+	relativePath := r.URL.Query().Get("path")
+
+	baseDir, _ := os.Getwd()
+	fullSourcePath := filepath.Join(baseDir, relativePath)
+
+	fileName := filepath.Base(fullSourcePath) + ".zip"
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", fileName))
+
+	zipWriter := zip.NewWriter(w)
+	defer zipWriter.Close()
+
+	err := filepath.Walk(fullSourcePath, func(filePath string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if filePath == fullSourcePath {
+			return nil
+		}
+
+		relPath, err := filepath.Rel(filepath.Dir(fullSourcePath), filePath)
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		zipFileEntry, err := zipWriter.Create(relPath)
+		if err != nil {
+			return err
+		}
+
+		fsFile, err := os.Open(filePath)
+		if err != nil {
+			return err
+		}
+		defer fsFile.Close()
+
+		_, err = io.Copy(zipFileEntry, fsFile)
+		return err
+
+	})
+	if err != nil {
+		log.Printf("Failed to zip: %v", err)
 	}
 }
 
@@ -233,6 +330,7 @@ func main(){
 
 	http.Handle("/", wrappedHandler)
 	http.HandleFunc("/upload", uploadHandler)
+	http.HandleFunc("/zip", zipHandler)
 
 	ip := getLocalIP()
 
