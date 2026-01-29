@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,13 +83,13 @@ const tpl = `
 	</style>
 </head>
 <body>
+	<h1>📂 My Shared Files</h1>
 	<div style="background:white; padding: 10px; margin-bottom: 20px; border-radius: 8px;">
-		{{range .Breadcrumbs}}
+		{{range .BreadCrumbs}}
 			<a href="{{.Link}}" style="text-decoration: none; color: #007bff; font-weight: bold;">{{.Name}}</a>
 			<span style="color: #999;"> / </span>
 		{{end}}
 	</div>
-	<h1>📂 My Shared Files</h1>
 	<a href="/upload" class="upload-btn">Upload New File</a>
 
 	<div class="grid">
@@ -206,13 +207,14 @@ func customFileHandler(dir string) http.HandlerFunc {
 			cleanPath := strings.Trim(r.URL.Path, "/")
 			if cleanPath != "" {
 				parts := strings.Split(cleanPath, "/")
-				currentLink := ""
+				accumulatedPath := ""
 
 				for _, part := range parts {
-					currentLink = currentLink + "/" + path
+					encodedPart := url.PathEscape(part)
+					accumulatedPath = accumulatedPath + "/" + encodedPart
 					breadcrumbs = append(breadcrumbs, BreadCrumb{
 						Name: part,
-						Link: currentLink,
+						Link: accumulatedPath,
 					})
 				}
 			}
