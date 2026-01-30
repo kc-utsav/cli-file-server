@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/grandcat/zeroconf"
+	"github.com/mdp/qrterminal/v3"
 )
 
 type FileItem struct {
@@ -247,12 +248,12 @@ func customFileHandler(dir string) http.HandlerFunc {
 				}
 
 				currentUrlPath := filepath.Join(r.URL.Path, entry.Name())
-				downloadUrl := ""
+				downloadURL := ""
 
 				if entry.IsDir() {
-					downloadUrl = fmt.Sprintf("/zip?path=%s", currentUrlPath)
+					downloadURL = fmt.Sprintf("/zip?path=%s", currentUrlPath)
 				} else {
-					downloadUrl = currentUrlPath
+					downloadURL = currentUrlPath
 				}
 
 				items = append(items, FileItem{
@@ -260,7 +261,7 @@ func customFileHandler(dir string) http.HandlerFunc {
 					Path: currentUrlPath,
 					IsDir: entry.IsDir(),
 					Size: size,
-					DownloadURL: downloadUrl,
+					DownloadURL: downloadURL,
 				})
 			}
 
@@ -390,6 +391,12 @@ func main(){
 	fmt.Printf("Sharing: %s\n", currentDir)
 	fmt.Printf("On Wifi: http://%s:%s\n", ip, *portPtr)
 	fmt.Printf("On domain: http://fileshare.local:%s\n", *portPtr)
+
+	fullURL := fmt.Sprintf("http://%s:%s", ip, *portPtr)
+	fmt.Println("\nScan to connect")
+
+	qrterminal.GenerateHalfBlock(fullURL, qrterminal.L, os.Stdout)
+	fmt.Println("")
 
 	log.Fatal(http.ListenAndServe("0.0.0.0:"+*portPtr , nil))
 }
