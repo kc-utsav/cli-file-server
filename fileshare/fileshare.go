@@ -160,22 +160,31 @@ const uploadTpl = `
 		#file-list li { padding: 8px; border-bottom: 1px solid #eee; font-size: 14px; display: flex; justify-content: space-between; }
 		#file-list li:last-child { border-bottom: none; }
 		.count { background: #eee; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+
+		/* progress bar */
+		#progress-container { display: none; margin-top: 20px; background: #eee; border-radius: 6px; overflow: hidden; }
+		#progress-bar { width: 0%; height: 20px; background: #28a745; transition: width 0.2s; }
+		#status { margin-top: 10px; font-size: 14px; color: #555; }
 	</style>
 </head>
 <body>
 	<div class="container">
 		<h1>⬆️ Upload Files</h1>
-		<form action="/upload" method="post" enctype="multipart/form-data">
+		<form id="uploadForm">
 			<div class="upload-zone">
 				<p>📂 Drag files here<br>or tap to browse</p>
 				<input type="file" name="myFiles" id="fileInput" multiple onchange="updateList()">
 			</div>
 
 			<ul id="file-list"></ul>
+			<div id="progress-container">
+				<div id="progress-bar"></div>
+			</div>
+			<div id="status"></div>
 
-			<button type="submit" class="btn">Start Upload</button>
+			<button type="button" class="btn" onclick="uploadFiles()">Start Upload</button>
 		</form>
-		<a href="/" class="back-link">Cancel & Go Back</a>
+		<a href="/" class="back-link">Cancel</a>
 	</div>
 
 	<script>
@@ -194,6 +203,44 @@ const uploadTpl = `
 					list.appendChild(li);
 				}
 			}
+		}
+
+		function uploadFiles() {
+			const input = document.getElementById('fileInput');
+			if (input.files.length === 0) {
+				alert("Please select a file.");
+				return;
+			}
+
+			const files = input.files;
+			const formData = new FormData();
+
+			for (let i = 0; i < files.length; i++) {
+				formData.append("myFiles", files[i])
+			}
+
+			document.getElementById('progress-container').style.display = 'block';
+
+			const xhr = new XMLHttpRequest();
+			xhr.open("POST", "/upload", true);
+
+			xhr.upload.onprogress = function(e) {
+				if (e.lengthComputable) {
+					const percentComplete = (e.loaded / e.total) * 100;
+					document.getElementById('progress-bar').style.width = percentComplete + "%";
+					document.getElementById('status').innerText = Math.round(percentComplete) + '% uploaded';
+				}
+			};
+
+			xhr.onload = function(e) {
+				if (xhr.status == 200) {
+					document.getElementById('status').innerText = "Done! Redirecting...";
+					setTimeout(() => window.location.href = '/', 1000);
+				} else {
+					document.getElementById('status').innerText = "Error: " + xhr.statusText;
+				}
+			};
+			xhr.send(formData);
 		}
 	</script>
 </body>
@@ -245,38 +292,39 @@ func uploadHandler( w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := r.ParseMultipartForm(32 << 20)
+	reader, err := r.MultipartReader()
 	if err != nil {
-		http.Error(w, "File too big or error parsing data", http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	files := r.MultipartForm.File["myFiles"]
-	if len(files) == 0 {
-		http.Error(w, "No files selected", http.StatusBadRequest)
-	}
-
-	for _, fileHeader := range files {
-		file, err := fileHeader.Open()
-		if err != nil {
-			log.Printf("Error retrieving file: %v", err)
-			continue
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
 		}
-		dst, err := os.Create(filepath.Base(fileHeader.Filename))
 		if err != nil {
-			http.Error(w, "Error creating file on server", http.StatusInternalServerError)
-			file.Close()
-			continue
-		}
-		_, err = io.Copy(dst, file)
-		if err != nil {
-			http.Error(w, "Error saving file", http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		defer dst.Close()
-		defer file.Close()
+		if part.FileName() == "" {
+			continue
+		}
+		dst, err := os.Create(filepath.Base(part.FileName()))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			continue
+		}
+		_, err = io.Copy(dst, part)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			dst.Close()
+			return
+		}
+		dst.Close()
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, "Upload Complete")
 }
 
 func customFileHandler(dir string) http.HandlerFunc {
@@ -327,18 +375,18 @@ func customFileHandler(dir string) http.HandlerFunc {
 					size = fmt.Sprintf("%.2f KB", float64(info.Size())/1024)
 				}
 
-				currentUrlPath := filepath.Join(r.URL.Path, entry.Name())
+				currentURLPath := filepath.Join(r.URL.Path, entry.Name())
 				downloadURL := ""
 
 				if entry.IsDir() {
-					downloadURL = fmt.Sprintf("/zip?path=%s", currentUrlPath)
+					downloadURL = fmt.Sprintf("/zip?path=%s", currentURLPath)
 				} else {
-					downloadURL = currentUrlPath
+					downloadURL = currentURLPath
 				}
 
 				items = append(items, FileItem{
 					Name: entry.Name(),
-					Path: currentUrlPath,
+					Path: currentURLPath,
 					IsDir: entry.IsDir(),
 					Size: size,
 					DownloadURL: downloadURL,
