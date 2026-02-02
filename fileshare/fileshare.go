@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/net/http2"
 	"github.com/grandcat/zeroconf"
 	"github.com/mdp/qrterminal/v3"
 )
@@ -31,6 +32,11 @@ type BreadCrumb struct {
 	Name string
 	Link string
 }
+
+const (
+	certFile = "cert.pem"
+	keyFile = "key.pem"
+)
 
 const tpl = `
 <!DOCTYPE html>
@@ -153,18 +159,23 @@ const uploadTpl = `
 			transition: background 0.2s;
 		}
 		.btn:hover { background: #0056b3; }
+		.btn:disabled { background: #ccc; cursor: not-allowed; }
 		.back-link { display: block; margin-top: 15px; color: #666; text-decoration: none; font-size: 14px; }
 
-		/* Selected Files List */
-		#file-list { list-style: none; padding: 0; margin: 15px 0; text-align: left; }
-		#file-list li { padding: 8px; border-bottom: 1px solid #eee; font-size: 14px; display: flex; justify-content: space-between; }
-		#file-list li:last-child { border-bottom: none; }
-		.count { background: #eee; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+		/* The Queue List */
+		#queue { list-style: none; padding: 0; margin: 20px 0; text-align: left; }
+		.queue-item { background: #fff; border: 1px solid #eee; margin-bottom: 10px; padding: 10px; border-radius: 6px; position: relative; overflow: hidden; }
 
+		/* The Progress Bar inside the list item */
+		.progress-bg { position: absolute; top: 0; left: 0; height: 100%; background: #e6fffa; width: 0%; z-index: 0; transition: width 0.2s; }
+		.item-text { position: relative; z-index: 1; display: flex; justify-content: space-between; font-size: 14px; }
+		.status-icon { font-weight: bold; }
 		/* progress bar */
+		/*
 		#progress-container { display: none; margin-top: 20px; background: #eee; border-radius: 6px; overflow: hidden; }
 		#progress-bar { width: 0%; height: 20px; background: #28a745; transition: width 0.2s; }
 		#status { margin-top: 10px; font-size: 14px; color: #555; }
+		*/
 	</style>
 </head>
 <body>
@@ -173,37 +184,36 @@ const uploadTpl = `
 		<form id="uploadForm">
 			<div class="upload-zone">
 				<p>📂 Drag files here<br>or tap to browse</p>
-				<input type="file" name="myFiles" id="fileInput" multiple onchange="updateList()">
+				<input type="file" name="myFiles" id="fileInput" multiple onchange="handleSelect()">
 			</div>
 
-			<ul id="file-list"></ul>
-			<div id="progress-container">
-				<div id="progress-bar"></div>
-			</div>
-			<div id="status"></div>
+			<ul id="queue"></ul>
 
-			<button type="button" class="btn" onclick="uploadFiles()">Start Upload</button>
+			<button id="uploadBtn" type="button" class="btn" onclick="startQueue()">Start Upload</button>
 		</form>
 		<a href="/" class="back-link">Cancel</a>
 	</div>
 
 	<script>
-		// Simple JS to show the names of selected files
-		function updateList() {
-			const input = document.getElementById('fileInput');
-			const list = document.getElementById('file-list');
-			list.innerHTML = '';
+		let uploadQueue = [];
+		let isUploading = false;
 
-			if (input.files.length > 0) {
-				for (let i = 0; i < input.files.length; i++) {
-					const li = document.createElement('li');
-					// Show name and size (in KB)
-					const size = (input.files[i].size / 1024).toFixed(1) + ' KB';
-					li.innerHTML = '<span>' + input.files[i].name + '</span> <span class="count">' + size + '</span>';
-					list.appendChild(li);
-				}
+		function handleSelect() {
+			const input = document.getElementById('fileInput');
+			const list = document.getElementById('queue');
+
+			for (let i = 0; i < input.files.length; i++) {
+				uploadQueue.push({
+					file: input.files[i],
+					id: 'file-' + Date.now() + '-' + i,
+					status: 'pending'
+				});
 			}
+			renderQueue();
+			document.getElementById('uploadBtn').style.display = "block";
+			input.value = '';
 		}
+
 
 		function uploadFiles() {
 			const input = document.getElementById('fileInput');
@@ -292,6 +302,30 @@ func uploadHandler( w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rawFileName := r.Header.Get("X-File-Name")
+
+	if rawFileName != "" {
+		fileName, _ := url.PathUnescape(rawFileName)
+		fileName = filepath.Base(fileName)
+
+		dst, err := os.Create(fileName)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer dst.Close()
+
+		_, err = io.Copy(dst, r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "Upload Success")
+	}
+
+	//MultipartReader (fallback)
 	reader, err := r.MultipartReader()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -409,7 +443,7 @@ func customFileHandler(dir string) http.HandlerFunc {
 			t.Execute(w, data)
 			return
 		}
-		http.FileServer(http.Dir(dir)).ServeHTTP(w,r)
+		http.ServeFile(w, r, filePath)
 	}
 }
 
@@ -526,5 +560,8 @@ func main(){
 	qrterminal.GenerateHalfBlock(fullURL, qrterminal.L, os.Stdout)
 	fmt.Println("")
 
-	log.Fatal(http.ListenAndServe("0.0.0.0:"+*portPtr , nil))
+	server := &http.Server{Addr: ":port"}
+	http2.ConfigureServer(server, &http2.Server{})
+	server.ListenAndServeTLS(certFile, keyFile)
+
 }
