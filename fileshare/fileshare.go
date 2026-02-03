@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bufio"
 	"flag"
 	"fmt"
 	"html/template"
@@ -15,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 
-	"golang.org/x/net/http2"
 	"github.com/grandcat/zeroconf"
 	"github.com/mdp/qrterminal/v3"
 )
@@ -34,16 +34,29 @@ type BreadCrumb struct {
 }
 
 const (
-	certFile = "cert.pem"
-	keyFile = "key.pem"
+	transferBufferSize = 1 << 20
 )
+
+// skip zip compression for these
+var compressedExts = map[string]bool{
+	".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true,
+	".mp4": true, ".mkv": true, ".avi": true, ".mov": true, ".webm": true, ".mp3": true, ".aac": true, ".flac": true, ".ogg": true,
+	".zip": true, ".gz": true, ".bz2": true, ".xz": true, ".7z": true, ".rar": true,
+	".pdf": true,
+}
+
+// copyBuffered uses a larger buffer for faster transfers
+func copyBuffered(dst io.Writer, src io.Reader) (int64, error) {
+	buf := make([]byte, transferBufferSize)
+	return io.CopyBuffer(dst, src, buf)
+}
 
 const tpl = `
 <!DOCTYPE html>
 <html>
 <head>
 	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<title>My File Server</title>
+	<title>File Server</title>
 	<style>
 		body { font-family: -apple-system, system-ui, sans-serif; background: #f4f4f4; padding: 20px; }
 		h1 { text-align: center; color: #333; }
@@ -93,15 +106,14 @@ const tpl = `
 	</style>
 </head>
 <body>
-	<h1>📂 My Shared Files</h1>
+	<h1>My Shared Files</h1>
 	<div style="background:white; padding: 10px; margin-bottom: 20px; border-radius: 8px;">
 		{{range .BreadCrumbs}}
 			<a href="{{.Link}}" style="text-decoration: none; color: #007bff; font-weight: bold;">{{.Name}}</a>
 			<span style="color: #999;"> / </span>
 		{{end}}
 	</div>
-	<a href="/upload" class="upload-btn">Upload New File</a>
-
+	<a href="/upload?dir={{.CurrentPath}}" class="upload-btn">Upload New File</a>
 	<div class="grid">
 		{{range .Files}}
 		<div class="card">
@@ -112,7 +124,7 @@ const tpl = `
 				<div class="name">{{.Name}}</div>
 				{{if not .IsDir}} <div class="size">{{.Size}}</div> {{end}}
 			</a>
-			{{if.DownloadURL}}
+			{{if .DownloadURL}}
 			<div class="actions">
 				<a href="{{.DownloadURL}}" class="download-btn" download>Save</a>
 				</div>
@@ -162,94 +174,147 @@ const uploadTpl = `
 		.btn:disabled { background: #ccc; cursor: not-allowed; }
 		.back-link { display: block; margin-top: 15px; color: #666; text-decoration: none; font-size: 14px; }
 
-		/* The Queue List */
-		#queue { list-style: none; padding: 0; margin: 20px 0; text-align: left; }
-		.queue-item { background: #fff; border: 1px solid #eee; margin-bottom: 10px; padding: 10px; border-radius: 6px; position: relative; overflow: hidden; }
+		.cancel-btn { display: block; margin-top: 15px; color: #666; background: none; border: none; font-size: 14px; cursor: pointer; width: 100%; text-decoration: underline;}
+		.cancel-btn:hover { color: #333; }
 
-		/* The Progress Bar inside the list item */
-		.progress-bg { position: absolute; top: 0; left: 0; height: 100%; background: #e6fffa; width: 0%; z-index: 0; transition: width 0.2s; }
-		.item-text { position: relative; z-index: 1; display: flex; justify-content: space-between; font-size: 14px; }
-		.status-icon { font-weight: bold; }
-		/* progress bar */
-		/*
+		/* File List */
+		#file-list { list-style: none; padding: 0; margin: 15px 0; text-align: left; }
+		#file-list li { padding: 8px; border-bottom: 1px solid #eee; font-size: 14px; display: flex; justify-content: space-between; }
+		#file-list li:last-child { border-bottom: none; }
+		.count { background: #eee; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+
+		/* Progress Bar */
 		#progress-container { display: none; margin-top: 20px; background: #eee; border-radius: 6px; overflow: hidden; }
 		#progress-bar { width: 0%; height: 20px; background: #28a745; transition: width 0.2s; }
 		#status { margin-top: 10px; font-size: 14px; color: #555; }
-		*/
 	</style>
 </head>
 <body>
 	<div class="container">
-		<h1>⬆️ Upload Files</h1>
+		<h1>Upload Files</h1>
 		<form id="uploadForm">
 			<div class="upload-zone">
 				<p>📂 Drag files here<br>or tap to browse</p>
-				<input type="file" name="myFiles" id="fileInput" multiple onchange="handleSelect()">
+				<input type="file" name="myFiles" id="fileInput" multiple onchange="updateList()">
 			</div>
 
-			<ul id="queue"></ul>
+			<p id="fileCount">No files selected</p>
 
-			<button id="uploadBtn" type="button" class="btn" onclick="startQueue()">Start Upload</button>
+			<ul id="file-list"></ul>
+
+			<button id="uploadBtn" type="button" class="btn" onclick="uploadFiles()">Start Upload</button>
+
+			<div id="progress-container">
+				<div id="progress-bar"></div>
+			</div>
 		</form>
-		<a href="/" class="back-link">Cancel</a>
+
+		<div id="status"></div>
+		<button type="button" class="cancel-btn" onclick="cancelUpload()">Cancel / Go Back</button>
 	</div>
 
 	<script>
-		let uploadQueue = [];
-		let isUploading = false;
+		const urlParams = new URLSearchParams(window.location.search);
+		const targetDir = urlParams.get('dir') || "/";
+		let xhr = null;
 
-		function handleSelect() {
-			const input = document.getElementById('fileInput');
-			const list = document.getElementById('queue');
-
-			for (let i = 0; i < input.files.length; i++) {
-				uploadQueue.push({
-					file: input.files[i],
-					id: 'file-' + Date.now() + '-' + i,
-					status: 'pending'
-				});
-			}
-			renderQueue();
-			document.getElementById('uploadBtn').style.display = "block";
-			input.value = '';
+		function formatSize(bytes) {
+			if (bytes === 0) return '0 B';
+			const k = 1024;
+			const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+			const i = Math.floor(Math.log(bytes) / Math.log(k));
+			return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 		}
 
+		function updateList() {
+			const input = document.getElementById('fileInput');
+			const list = document.getElementById('file-list');
+			const countLabel = document.getElementById('fileCount');
+
+			if (!input || !list || !countLabel) return;
+
+			countLabel.innerText = input.files.length + " file(s) selected.";
+			list.innerHTML = '';
+
+			if (input.files.length > 0) {
+				for (let i = 0; i < input.files.length; i++) {
+					const li = document.createElement('li');
+					li.innerHTML = '<span>' + input.files[i].name + '</span> <span class="count">' + formatSize(input.files[i].size) + '</span>';
+					list.appendChild(li);
+				}
+			}
+		}
+
+		function cancelUpload() {
+			if (xhr) {
+				xhr.abort();
+			}
+			window.location.href = targetDir;
+		}
 
 		function uploadFiles() {
 			const input = document.getElementById('fileInput');
-			if (input.files.length === 0) {
+			const statusDisplay = document.getElementById('status');
+			const files = input.files;
+
+			if (files.length === 0) {
 				alert("Please select a file.");
 				return;
 			}
 
-			const files = input.files;
 			const formData = new FormData();
-
 			for (let i = 0; i < files.length; i++) {
-				formData.append("myFiles", files[i])
+				formData.append("myFiles", files[i]);
 			}
 
+			document.getElementById('uploadBtn').disabled = true;
 			document.getElementById('progress-container').style.display = 'block';
 
-			const xhr = new XMLHttpRequest();
-			xhr.open("POST", "/upload", true);
+			xhr = new XMLHttpRequest();
+			xhr.open("POST", "/upload?dir=" + encodeURIComponent(targetDir), true);
+
+			let startTime = Date.now();
+			let previousLoaded = 0;
 
 			xhr.upload.onprogress = function(e) {
 				if (e.lengthComputable) {
+					const now = Date.now();
 					const percentComplete = (e.loaded / e.total) * 100;
-					document.getElementById('progress-bar').style.width = percentComplete + "%";
-					document.getElementById('status').innerText = Math.round(percentComplete) + '% uploaded';
+					const timeDiff = (now - startTime) / 1000; // seconds
+					if (timeDiff > 0.2) {
+						const bytesDiff = e.loaded - previousLoaded;
+						const speed = bytesDiff / timeDiff;
+						const speedStr = formatSize(speed) + "/s";
+						document.getElementById('progress-bar').style.width = percentComplete + "%";
+						statusDisplay.innerText = Math.round(percentComplete) + '% (' + speedStr + ')';
+						startTime = now;
+						previousLoaded = e.loaded;
+					}
 				}
 			};
 
 			xhr.onload = function(e) {
 				if (xhr.status == 200) {
-					document.getElementById('status').innerText = "Done! Redirecting...";
-					setTimeout(() => window.location.href = '/', 1000);
+					statusDisplay.innerText = "Processing...";
+					setTimeout(() => {
+						statusDisplay.innerText = "Done! Redirecting...";
+						window.location.href = targetDir
+					}, 1000);
 				} else {
-					document.getElementById('status').innerText = "Error: " + xhr.statusText;
+					statusDisplay.innerText = "Error: " + xhr.responseText;
+					document.getElementById('uploadBtn').disabled = false;
 				}
 			};
+
+			xhr.onerror = function() {
+				if (xhr.status === 0) return;
+				statusDisplay.innerText = "Network Error";
+				document.getElementById('uploadBtn').disabled = false;
+			};
+			xhr.onabort = function() {
+				statusDisplay.innerText = "Cancelled.";
+			};
+
 			xhr.send(formData);
 		}
 	</script>
@@ -295,43 +360,48 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func uploadHandler( w http.ResponseWriter, r *http.Request) {
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
+		targetDir := r.URL.Query().Get("dir")
+		if targetDir == "" {
+			targetDir = "/"
+		}
+		data := struct{ ReturnLink string }{ ReturnLink: targetDir }
 		t, _ := template.New("upload").Parse(uploadTpl)
-		t.Execute(w, nil)
+		t.Execute(w, data)
 		return
 	}
 
-	rawFileName := r.Header.Get("X-File-Name")
-
-	if rawFileName != "" {
-		fileName, _ := url.PathUnescape(rawFileName)
-		fileName = filepath.Base(fileName)
-
-		dst, err := os.Create(fileName)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer dst.Close()
-
-		_, err = io.Copy(dst, r.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "Upload Success")
+	baseDir, err := os.Getwd()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	relDir := filepath.Clean(r.URL.Query().Get("dir"))
+	if strings.Contains(relDir, "..") {
+		http.Error(w, "Invalid Directory", http.StatusForbidden)
 	}
 
-	//MultipartReader (fallback)
+	absUploadDir := filepath.Join(baseDir, relDir)
+	if _, err := os.Stat(absUploadDir); os.IsNotExist(err) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	targetDir := filepath.Clean(r.URL.Query().Get("dir"))
+	if strings.Contains(targetDir, "..") {
+		http.Error(w, "Invalid Directory", http.StatusForbidden)
+		return
+	}
+
+	// Init Multipart Reader
 	reader, err := r.MultipartReader()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	fileCount := 0
 	for {
 		part, err := reader.NextPart()
 		if err == io.EOF {
@@ -341,29 +411,54 @@ func uploadHandler( w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if part.FileName() == "" {
+		fileName := part.FileName()
+		if fileName == "" {
 			continue
 		}
-		dst, err := os.Create(filepath.Base(part.FileName()))
+
+		safeFileName := filepath.Base(fileName)
+
+		tmpFileName := fmt.Sprintf(".%s.partial", safeFileName)
+		tmpPath := filepath.Join(absUploadDir, tmpFileName)
+		dstPath := filepath.Join(absUploadDir, safeFileName)
+
+		dst, err := os.Create(tmpPath)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			continue
 		}
-		_, err = io.Copy(dst, part)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			dst.Close()
+		// Use buffered writer for faster multipart uploads
+		bw := bufio.NewWriterSize(dst, transferBufferSize)
+		_, copyErr := copyBuffered(bw, part)
+
+		flushErr := bw.Flush()
+		closeErr := dst.Close()
+
+		if copyErr != nil || flushErr != nil || closeErr != nil {
+			log.Printf("Upload failed for %s", safeFileName)
+			os.Remove(tmpPath)
+			http.Error(w, "Upload interrupted", http.StatusInternalServerError)
 			return
 		}
-		dst.Close()
+
+		if err := os.Rename(tmpPath, dstPath); err != nil {
+			log.Printf("Rename error: %v", err)
+			os.Remove(tmpPath)
+			http.Error(w, "Error finalizing file", http.StatusInternalServerError)
+			return
+		}
+
+		fileCount++
+		log.Printf("Uploaded: %s -> %s", safeFileName, relDir)
 	}
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "Upload Complete")
+	fmt.Fprint(w, "Successfully uploaded %d files", fileCount)
 }
 
 func customFileHandler(dir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := filepath.Join(dir, r.URL.Path)
+
 
 		info, err := os.Stat(path)
 		if err != nil {
@@ -401,16 +496,21 @@ func customFileHandler(dir string) http.HandlerFunc {
 
 			var items []FileItem
 			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), ".") || strings.HasSuffix(entry.Name(), ".partial") {
+					continue
+				}
 				size := ""
-				info, _ := entry.Info()
-
 
 				if !entry.IsDir() {
 					size = fmt.Sprintf("%.2f KB", float64(info.Size())/1024)
 				}
 
 				currentURLPath := filepath.Join(r.URL.Path, entry.Name())
-				downloadURL := ""
+				currentURLPath = filepath.ToSlash(currentURLPath)
+				if !strings.HasPrefix(currentURLPath, "/") {
+					currentURLPath = "/" + currentURLPath
+				}
+				downloadURL := currentURLPath
 
 				if entry.IsDir() {
 					downloadURL = fmt.Sprintf("/zip?path=%s", currentURLPath)
@@ -419,50 +519,64 @@ func customFileHandler(dir string) http.HandlerFunc {
 				}
 
 				items = append(items, FileItem{
-					Name: entry.Name(),
-					Path: currentURLPath,
-					IsDir: entry.IsDir(),
-					Size: size,
+					Name:        entry.Name(),
+					Path:        currentURLPath,
+					IsDir:       entry.IsDir(),
+					Size:        size,
 					DownloadURL: downloadURL,
 				})
 			}
 
 			data := struct {
 				BreadCrumbs []BreadCrumb
-				Files []FileItem
+				Files       []FileItem
+				CurrentPath string
 			}{
 				BreadCrumbs: breadcrumbs,
-				Files: items,
+				Files:       items,
+				CurrentPath: r.URL.Path,
 			}
 
 			t, err := template.New("webpage").Parse(tpl)
 			if err != nil {
+				log.Printf("[ERROR] Template parse error: %v", err)
 				http.Error(w, "Template error", 500)
 				return
 			}
-			t.Execute(w, data)
+			if err := t.Execute(w, data); err != nil {
+				log.Printf("[ERROR] Template execution error: %v", err)
+			}
 			return
 		}
-		http.ServeFile(w, r, filePath)
+		http.ServeFile(w, r, path)
 	}
 }
 
 func zipHandler(w http.ResponseWriter, r *http.Request) {
 	relativePath := r.URL.Query().Get("path")
+	if strings.Contains(relativePath, "..") {
+		http.Error(w, "Forbidden", 403)
+		return
+	}
 
 	baseDir, _ := os.Getwd()
 	fullSourcePath := filepath.Join(baseDir, relativePath)
+
 
 	fileName := filepath.Base(fullSourcePath) + ".zip"
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", fileName))
 
-	zipWriter := zip.NewWriter(w)
+	// Buffer write for better throughput
+	bw := bufio.NewWriterSize(w, transferBufferSize)
+	defer bw.Flush()
+
+	zipWriter := zip.NewWriter(bw)
 	defer zipWriter.Close()
 
 	err := filepath.Walk(fullSourcePath, func(filePath string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+		if err != nil || info.IsDir() {
+			return nil
 		}
 		if filePath == fullSourcePath {
 			return nil
@@ -477,7 +591,20 @@ func zipHandler(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 
-		zipFileEntry, err := zipWriter.Create(relPath)
+		// Use Store (no compression) for already-compressed files
+		ext := strings.ToLower(filepath.Ext(filePath))
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = relPath
+		if compressedExts[ext] {
+			header.Method = zip.Store
+		} else {
+			header.Method = zip.Deflate
+		}
+
+		zipFileEntry, err := zipWriter.CreateHeader(header)
 		if err != nil {
 			return err
 		}
@@ -488,7 +615,7 @@ func zipHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		defer fsFile.Close()
 
-		_, err = io.Copy(zipFileEntry, fsFile)
+		_, err = copyBuffered(zipFileEntry, fsFile)
 		return err
 
 	})
@@ -524,11 +651,11 @@ func startMDNS(port int, ip string, iface *net.Interface) {
 
 	go func() {
 		<-make(chan struct{})
-	_ = server
+		_ = server
 	}()
 }
 
-func main(){
+func main() {
 
 	portPtr := flag.String("port", "8080", "The port to run the server on")
 	flag.Parse()
@@ -560,8 +687,10 @@ func main(){
 	qrterminal.GenerateHalfBlock(fullURL, qrterminal.L, os.Stdout)
 	fmt.Println("")
 
-	server := &http.Server{Addr: ":port"}
-	http2.ConfigureServer(server, &http2.Server{})
-	server.ListenAndServeTLS(certFile, keyFile)
+	server := &http.Server{
+		Addr:           "0.0.0.0:" + *portPtr,
+		MaxHeaderBytes: 1 << 20, // 1MB headers
+	}
+	log.Fatal(server.ListenAndServe())
 
 }
