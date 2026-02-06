@@ -2,7 +2,6 @@
 package worker
 
 import (
-	"log"
 	"sync"
 )
 
@@ -28,11 +27,9 @@ func (p *Pool) Start() {
 		p.wg.Add(1)
 		go func(workerID int) {
 			defer p.wg.Done()
-			log.Printf("Worker %d started", workerID)
 			for job := range p.JobQueue {
 				job.Process()
 			}
-			log.Printf("Worker %d stopped", workerID)
 		}(i)
 	}
 }

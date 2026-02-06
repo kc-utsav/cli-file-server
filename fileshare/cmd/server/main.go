@@ -27,12 +27,15 @@ func main() {
 	currentDir, _ := os.Getwd()
 
 	http.HandleFunc("/", handlers.FileServerHandler(currentDir))
-	http.HandleFunc("/upload", handlers.UploadHandler)
+	http.HandleFunc("/upload", handlers.UploadHandlerFactory(wp))
 	http.HandleFunc("/zip", handlers.ZipHandlerFactory(wp))
 
 	ip, iface := network.GetLocalIP()
 	portInt, _ := strconv.Atoi(*portPtr)
-	network.StartMDNS(portInt, ip, iface)
+	server, err := network.StartMDNS(portInt, ip, iface)
+	if err != nil {
+		defer server.Shutdown()
+	}
 
 	fullURL := fmt.Sprintf("http://%s:%s", ip, *portPtr)
 	fmt.Printf("\n--- Server Running ---\n")
@@ -42,10 +45,10 @@ func main() {
 
 	qrterminal.GenerateHalfBlock(fullURL, qrterminal.L, os.Stdout)
 
-	server := &http.Server{
+	http := &http.Server{
 		Addr: ":" + *portPtr,
 		MaxHeaderBytes: 1 << 20,
 	}
 
-	log.Fatal(server.ListenAndServe())
+	log.Fatal(http.ListenAndServe())
 }
