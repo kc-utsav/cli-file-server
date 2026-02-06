@@ -24,8 +24,8 @@ var compressedExts = map[string]bool{
 
 type ZipJob struct {
 	SourcePath string
-	Writer http.ResponseWriter
-	Done chan struct{}
+	Writer     http.ResponseWriter
+	Done       chan struct{}
 }
 
 func (z ZipJob) Process() {
@@ -88,7 +88,7 @@ func ZipHandlerFactory(wp *worker.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		relativePath := r.URL.Query().Get("path")
 		if strings.Contains(relativePath, "..") {
-			http.Error(w, "Forbidden", 403)
+			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 		baseDir, _ := os.Getwd()
@@ -97,10 +97,20 @@ func ZipHandlerFactory(wp *worker.Pool) http.HandlerFunc {
 		doneChan := make(chan struct{})
 		job := ZipJob{
 			SourcePath: fullSourcePath,
-			Writer: w,
-			Done: doneChan,
+			Writer:     w,
+			Done:       doneChan,
 		}
-		wp.Submit(job)
-		<- doneChan
+		ctx := r.Context()
+		if !wp.TrySubmit(ctx, job) {
+			http.Error(w, "Server busy, please try again", http.StatusServiceUnavailable)
+			return
+		}
+
+		select {
+		case <-doneChan:
+		case <-ctx.Done():
+			log.Printf("Client disconnected during zip: %s", relativePath)
+		}
+		<-doneChan
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"time"
 
 	"github.com/mdp/qrterminal/v3"
 )
@@ -20,20 +21,23 @@ func main() {
 	flag.Parse()
 
 	numWorkers := runtime.NumCPU()
-	wp := worker.NewPool(numWorkers, 10)
-	wp.Start()
-	defer wp.Stop()
+	uploadPool := worker.NewPool(numWorkers, 500)
+	downloadPool := worker.NewPool(4, 20)
+	uploadPool.Start()
+	downloadPool.Start()
+	defer uploadPool.Stop()
+	defer downloadPool.Stop()
 
 	currentDir, _ := os.Getwd()
 
 	http.HandleFunc("/", handlers.FileServerHandler(currentDir))
-	http.HandleFunc("/upload", handlers.UploadHandlerFactory(wp))
-	http.HandleFunc("/zip", handlers.ZipHandlerFactory(wp))
+	http.HandleFunc("/upload", handlers.UploadHandlerFactory(uploadPool))
+	http.HandleFunc("/zip", handlers.ZipHandlerFactory(downloadPool))
 
 	ip, iface := network.GetLocalIP()
 	portInt, _ := strconv.Atoi(*portPtr)
 	server, err := network.StartMDNS(portInt, ip, iface)
-	if err != nil {
+	if err == nil {
 		defer server.Shutdown()
 	}
 
@@ -48,6 +52,8 @@ func main() {
 	http := &http.Server{
 		Addr: ":" + *portPtr,
 		MaxHeaderBytes: 1 << 20,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout: 120 * time.Second,
 	}
 
 	log.Fatal(http.ListenAndServe())

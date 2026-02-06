@@ -2,7 +2,9 @@
 package worker
 
 import (
+	"context"
 	"sync"
+	"time"
 )
 
 type Job interface {
@@ -34,8 +36,30 @@ func (p *Pool) Start() {
 	}
 }
 
-func (p *Pool) Submit(job Job) {
-	p.JobQueue <- job
+func (p *Pool) TrySubmit(ctx context.Context, job Job) bool {
+	select {
+	case p.JobQueue <- job:
+		return true
+	case <- ctx.Done():
+		return false
+	}
+}
+
+func (p *Pool) SubmitWithTimeout(job Job, timeout time.Duration) bool {
+	select {
+	case p.JobQueue <- job:
+		return true
+	case <- time.After(timeout):
+		return false
+	}
+}
+
+func (p *Pool) QueueLength() int {
+	return len(p.JobQueue)
+}
+
+func (p *Pool) QueueCapacity() int {
+	return cap(p.JobQueue)
 }
 
 func (p *Pool) Stop() {

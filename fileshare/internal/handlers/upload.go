@@ -2,7 +2,7 @@
 package handlers
 
 import (
-	"bufio"
+	"context"
 	"fileshare/internal/templates"
 	"fileshare/internal/worker"
 	"fmt"
@@ -13,43 +13,49 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
-type UploadJob struct {
-	Reader io.Reader
-	TmpPath string
-	DstPath string
-	FileName string
-	ResultChan chan error
+const ChunkSize = 4 << 20
+
+var bufferPool = sync.Pool{
+	New: func() interface {} {
+		b := make([]byte, ChunkSize)
+		return &b
+	},
 }
 
-func (j *UploadJob) Process() {
-	defer close(j.ResultChan)
+type ChunkWriteJob struct {
+	File *os.File
+	Data []byte
+	DataLen int
+	Offset int64
+	Wg *sync.WaitGroup
+	ErrorChan chan error
+	Ctx context.Context
+}
 
-	dst, err := os.Create(j.TmpPath)
+func (j *ChunkWriteJob) Process() {
+	defer j.Wg.Done()
+	if j.Ctx != nil {
+		select {
+				case <-j.Ctx.Done():
+						ptr := &j.Data
+						bufferPool.Put(ptr)
+						return
+				default:
+		}
+	}
+	_, err := j.File.WriteAt(j.Data[:j.DataLen], j.Offset)
 	if err != nil {
-		j.ResultChan <- fmt.Errorf("failed to create tmp file: %v", err)
-		return
+		select {
+		case j.ErrorChan <- err:
+		default:
+		}
 	}
+	ptr := &j.Data
+	bufferPool.Put(ptr)
 
-	bw := bufio.NewWriterSize(dst, transferBufferSize)
-
-	_, copyErr := io.Copy(bw, j.Reader)
-
-	flushErr := bw.Flush()
-	closeErr := dst.Close()
-	if copyErr != nil || flushErr != nil || closeErr != nil {
-		os.Remove(j.TmpPath)
-		j.ResultChan <- fmt.Errorf("write failed for %s", j.FileName)
-		return
-	}
-
-	if err := os.Rename(j.TmpPath, j.DstPath); err != nil {
-		os.Remove(j.TmpPath)
-		j.ResultChan <- fmt.Errorf("rename failed: %v", err)
-		return
-	}
-	j.ResultChan <- nil
 }
 
 func UploadHandlerFactory(wp *worker.Pool) http.HandlerFunc {
@@ -64,6 +70,7 @@ func UploadHandlerFactory(wp *worker.Pool) http.HandlerFunc {
 			t.Execute(w, data)
 			return
 		}
+
 		baseDir, err := os.Getwd()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -80,12 +87,6 @@ func UploadHandlerFactory(wp *worker.Pool) http.HandlerFunc {
 			return
 		}
 
-		targetDir := filepath.Clean(r.URL.Query().Get("dir"))
-		if strings.Contains(targetDir, "..") {
-			http.Error(w, "Invalid Directory", http.StatusForbidden)
-			return
-		}
-
 		reader, err := r.MultipartReader()
 		if err != nil {
 			log.Printf("Multipart error: %v", err)
@@ -93,9 +94,9 @@ func UploadHandlerFactory(wp *worker.Pool) http.HandlerFunc {
 			return
 		}
 
-		var fileCount int
-		var uploadErrors []error
-		var results []chan error
+		fileCount := 0
+		errChan := make(chan error, 200)
+		ctx := r.Context()
 
 		for {
 			part, err := reader.NextPart()
@@ -109,52 +110,116 @@ func UploadHandlerFactory(wp *worker.Pool) http.HandlerFunc {
 			if part.FileName() == "" { continue }
 
 			safeFileName := filepath.Base(part.FileName())
-			tmpPath := filepath.Join(absUploadDir, "." + safeFileName + ".partial")
 			dstPath := filepath.Join(absUploadDir, safeFileName)
 
-			pr, pw := io.Pipe()
+			tmpFileName := fmt.Sprintf(".%s.part", safeFileName)
+			tmpPath := filepath.Join(absUploadDir, tmpFileName)
 
-			resultChan := make(chan error, 1)
-			results = append(results, resultChan)
-
-			job := &UploadJob{
-				Reader: pr,
-				TmpPath: tmpPath,
-				DstPath: dstPath,
-				FileName: safeFileName,
-				ResultChan: resultChan,
+			tmpFile, err := os.Create(tmpPath)
+			if err != nil {
+				log.Printf("Create error: %v", err)
+				continue
 			}
-			wp.Submit(job)
+			uploaded := false
+			func() {
+				defer func() {
+					tmpFile.Close()
+					if !uploaded {
+						os.Remove(tmpPath)
+						log.Printf("Cleaned up temp file: %s", tmpFileName)
+					}
+				}()
 
-			buf := make([]byte, transferBufferSize)
-			_, copyErr := io.CopyBuffer(pw, part, buf)
+				var fileWg sync.WaitGroup
+				var currentOffset int64 = 0
+				uploadErr := false
 
-			pw.CloseWithError(copyErr)
+				log.Printf("Pipleline started: %s", safeFileName)
 
+				for {
+					select {
+					case <- ctx.Done():
+						log.Printf("Upload cancelled by client: %s", safeFileName)
+						uploadErr = true
+						return
+					default:
+					}
 
+					bufPtr := bufferPool.Get().(*[]byte)
+					buf := *bufPtr
 
-			if copyErr != nil {
-				log.Printf("Network read error for %s: %v", safeFileName, copyErr)
-				http.Error(w, "Upload interrupted", http.StatusInternalServerError)
-				return
-			}
-			fileCount++
-			log.Printf("Uploaded: %s", safeFileName)
-		}
-		for _, rc := range results {
-			if err := <-rc; err != nil {
-				uploadErrors = append(uploadErrors, err)
-			}
-		}
-		if len(uploadErrors) > 0 {
-			msg := fmt.Sprintf("Uploaded %d files but %d failed", fileCount, len(uploadErrors))
-			log.Println(msg)
-			for _, e := range uploadErrors {
-				log.Println(" - ", e)
-			}
-			http.Error(w, msg, http.StatusInternalServerError)
-		}
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "Successfully uploaded %d files", fileCount)
+					n, readErr := io.ReadFull(part, buf)
+
+					if n > 0 {
+						fileWg.Add(1)
+
+						job := &ChunkWriteJob{
+							File: tmpFile,
+							Data: buf,
+							DataLen: n,
+							Offset: currentOffset,
+							Wg: &fileWg,
+							ErrorChan: errChan,
+							Ctx: ctx,
+						}
+						if !wp.TrySubmit(ctx, job) {
+							bufferPool.Put(bufPtr)
+							fileWg.Done()
+							log.Printf("Upload queue full for: %s", safeFileName)
+							uploadErr = true
+							return
+						}
+
+						currentOffset += int64(n)
+					} else {
+						bufferPool.Put(bufPtr)
+					}
+
+					select {
+					case e := <- errChan:
+						log.Printf("Write error: %v", e)
+						uploadErr = true
+						fileWg.Wait()
+						return
+					default:
+					}
+					if readErr != nil {
+						if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+							break
+						}
+						log.Printf("Network error: %v", err)
+						uploadErr = true
+						fileWg.Wait()
+						return
+					}
+				}
+
+				fileWg.Wait()
+
+				select {
+				case <- ctx.Done():
+					uploadErr = true
+				case e := <-errChan:
+					log.Printf("Final write error: %v", e)
+					uploadErr = true
+				default:
+				}
+				if uploadErr || ctx.Err() != nil {
+					return
+				}
+				tmpFile.Close()
+
+				if err := os.Rename(tmpPath, dstPath); err != nil {
+					log.Printf("Finalize error: %v", err)
+					return
+				}
+
+				uploaded = true
+				fileCount++
+				log.Printf("Uploaded: %s (Size: %.2f MB)", safeFileName, float64(currentOffset)/1024/1024)
+		}()
+	}
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Successfully uploaded %d files", fileCount)
 	}
 }

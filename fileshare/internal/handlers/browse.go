@@ -40,6 +40,7 @@ func FileServerHandler(baseDir string) http.HandlerFunc {
 
 		if !info.IsDir() {
 			http.ServeFile(w, r, fullPath)
+			return
 		}
 
 		entries, err := os.ReadDir(fullPath)
