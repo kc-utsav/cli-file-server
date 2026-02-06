@@ -37,11 +37,11 @@ func GetLocalIP() (string, *net.Interface) {
 	return "localhost", nil
 }
 
-func StartMDNS(port int, ip string, iface *net.Interface) {
+func StartMDNS(port int, ip string, iface *net.Interface) (*zeroconf.Server, error){
 
 	if iface == nil {
 		log.Println("No suitable network for mDNS")
-		return
+		return nil, nil
 	}
 
 	hostName := "fileshare"
@@ -58,12 +58,9 @@ func StartMDNS(port int, ip string, iface *net.Interface) {
 	)
 	if err != nil {
 		log.Printf("Could not start mDNS: %v", err)
-		return
+		return nil, err
 	}
 	log.Printf("mDNS active: http://%s:%d (Bound to %s)", hostName, port, iface.Name)
 
-	go func() {
-		<-make(chan struct{})
-		_ = server
-	}()
+	return server, nil
 }
