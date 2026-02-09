@@ -84,15 +84,15 @@ func ChunkedUploadHandler() http.HandlerFunc {
 		log.Printf("Chunk written: %s offset=%d size=%d", safeFileName, offset, written)
 
 		if isFinal {
-			file.Sync()
-			file.Close()
+			defer file.Sync()
+			defer file.Close()
 
 			if err := os.Rename(tmpPath, finalPath); err != nil {
 				log.Printf("Failed to finalize: %v", err)
 				http.Error(w, "Failed to finalize", http.StatusInternalServerError)
 				return
 			}
-			log.Printf("Upload Complete: %s", safeFileName)
+			defer log.Printf("Upload Complete: %s", safeFileName)
 		}
 
 		w.WriteHeader(http.StatusOK)

@@ -165,6 +165,7 @@ const UploadTpl = `
 
     <script>
 				const CHUNK_SIZE = 4 << 20
+				const PARALLEL_CHUNKS = 8
 
         const urlParams = new URLSearchParams(window.location.search);
         const targetDir = urlParams.get('dir') || "/";
@@ -273,8 +274,21 @@ const UploadTpl = `
 					async function uploadFileInChunks(file, onProgress) {
 						const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 						let uploadedBytes = 0;
+						let chunkIndex = 0
 
-						for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+						while (chunkIndex < totalChunks) {
+							const batch = []
+							for (let i = 0; i < PARALLEL_CHUNKS && chunkIndex < totalChunks; i++) {
+								batch.push(uploadChunk(file, chunkIndex, totalChunks));
+								chunkIndex++;
+							}
+							const results = await Promise.all(batch);
+							uploadedBytes += results.reduce((sum, r) => sum + r.bytesWritten, 0);
+							onProgress(uploadedBytes / file.size);
+						}
+					}
+
+					async function uploadChunk(file, chunkIndex, totalChunks) {
 							const start = chunkIndex * CHUNK_SIZE;
 							const end = Math.min(start + CHUNK_SIZE, file.size);
 
@@ -297,10 +311,9 @@ const UploadTpl = `
 								throw new Error(await response.text())
 							}
 
-							uploadedBytes += (end - start);
-							onProgress(uploadedBytes / file.size);
-						}
+							return { bytesWritten: end - start }
 					}
+
 					function cancelUpload() {
 						if (uploadController) {
 							uploadController.abort();
