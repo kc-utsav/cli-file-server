@@ -31,7 +31,7 @@ func main() {
 	currentDir, _ := os.Getwd()
 
 	http.HandleFunc("/", handlers.FileServerHandler(currentDir))
-	http.HandleFunc("/upload", handlers.UploadHandlerFactory(uploadPool))
+	http.HandleFunc("/upload", handlers.ChunkedUploadHandler())
 	http.HandleFunc("/zip", handlers.ZipHandlerFactory(downloadPool))
 
 	ip, iface := network.GetLocalIP()

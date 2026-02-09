@@ -145,7 +145,7 @@ const UploadTpl = `
         <form id="uploadForm">
             <div class="upload-zone">
                 <p>📂 Drag files here<br>or tap to browse</p>
-                <input type="file" name="myFiles" id="fileInput" multiple onchange="updateList()">
+                <input type="file" name="myFiles" id="fileInput" accept="*/*" multiple onchange="updateList()">
             </div>
 
             <p id="fileCount">No files selected</p>
@@ -164,9 +164,13 @@ const UploadTpl = `
     </div>
 
     <script>
+				const CHUNK_SIZE = 4 << 20
+
         const urlParams = new URLSearchParams(window.location.search);
         const targetDir = urlParams.get('dir') || "/";
-        let xhr = null;
+
+				let uploadController = null
+				let isUploading = false
 
         function formatSize(bytes) {
             if (bytes === 0) return '0 B';
@@ -189,84 +193,120 @@ const UploadTpl = `
             if (input.files.length > 0) {
                 for (let i = 0; i < input.files.length; i++) {
                     const li = document.createElement('li');
-                    li.innerHTML = '<span>' + input.files[i].name + '</span> <span class="count">' + formatSize(input.files[i].size) + '</span>';
+                    li.innerHTML = '<span>' + input.files[i].name + '</span>' + '<span class="count">' + formatSize(input.files[i].size) + '</span>';
                     list.appendChild(li);
                 }
             }
+						countLabel.innerText = input.files.length + " file(s) ready.";
         }
 
-        function cancelUpload() {
-            if (xhr) {
-                xhr.abort();
-            }
-            window.location.href = targetDir;
-        }
 
-        function uploadFiles() {
+        async function uploadFiles() {
             const input = document.getElementById('fileInput');
-            const statusDisplay = document.getElementById('status');
             const files = input.files;
+            const statusDisplay = document.getElementById('status');
 
             if (files.length === 0) {
                 alert("Please select a file.");
                 return;
             }
 
-            const formData = new FormData();
-            for (let i = 0; i < files.length; i++) {
-                formData.append("myFiles", files[i]);
-            }
+						if (isUploading) return
+						isUploading = true;
 
-            document.getElementById('uploadBtn').disabled = true;
-            document.getElementById('progress-container').style.display = 'block';
+						uploadController = new AbortController();
 
-            xhr = new XMLHttpRequest();
-            xhr.open("POST", "/upload?dir=" + encodeURIComponent(targetDir), true);
+						document.getElementById('uploadBtn').disabled = true;
+						document.getElementById('progress-container').style.display = 'block';
 
-            let startTime = Date.now();
-            let previousLoaded = 0;
+						let totalSize = 0;
+						let totalUploaded = 0;
 
-            xhr.upload.onprogress = function(e) {
-                if (e.lengthComputable) {
-                    const now = Date.now();
-                    const percentComplete = (e.loaded / e.total) * 100;
-                    const timeDiff = (now - startTime) / 1000; // seconds
-                    if (timeDiff > 0.2) {
-                        const bytesDiff = e.loaded - previousLoaded;
-                        const speed = bytesDiff / timeDiff;
-                        const speedStr = formatSize(speed) + "/s";
-                        document.getElementById('progress-bar').style.width = percentComplete + "%";
-                        statusDisplay.innerText = Math.round(percentComplete) + '% (' + speedStr + ')';
-                        startTime = now;
-                        previousLoaded = e.loaded;
-                    }
-                }
-            };
+						for (let i = 0; i < files.length; i++) {
+							totalSize += files[i].size;
+						}
 
-            xhr.onload = function(e) {
-                if (xhr.status == 200) {
-                    statusDisplay.innerText = "Processing...";
-                    setTimeout(() => {
-                        statusDisplay.innerText = "Done! Redirecting...";
-                        window.location.href = targetDir
-                    }, 1000);
-                } else {
-                    statusDisplay.innerText = "Error: " + xhr.responseText;
-                    document.getElementById('uploadBtn').disabled = false;
-                }
-            };
+						for (let i = 0; i < files.length; i++) {
+							const file = files[i]
+							statusDisplay.innerText = "Uploading " + file.name + "...";
 
-            xhr.onerror = function() {
-                if (xhr.status === 0) return;
-                statusDisplay.innerText = "Network Error";
-                document.getElementById('uploadBtn').disabled = false;
-            };
-            xhr.onabort = function() {
-                statusDisplay.innerText = "Cancelled.";
-            };
 
-            xhr.send(formData);
-        }
+							try {
+								let startTime = Date.now();
+								let previousLoaded = 0;
+								let speedStr = "0 B/s";
+
+								await uploadFileInChunks(file, (fileProgress) => {
+									const currentLoaded = fileProgress * file.size;
+									const now = Date.now()
+									const timeDiff = (now - startTime) / 1000;
+									if (timeDiff > 0.2) {
+										const bytesDiff = currentLoaded - previousLoaded;
+										const speed = bytesDiff / timeDiff;
+										speedStr = formatSize(speed) + "/s";
+
+										startTime = now;
+										previousLoaded = currentLoaded;
+									}
+									const overallProgress = ((totalUploaded + (fileProgress * file.size)) / totalSize) * 100;
+
+									document.getElementById('progress-bar').style.width = overallProgress + '%';
+									statusDisplay.innerText = "Uploading " + file.name + ": " + Math.round(fileProgress * 100) + "% (" + speedStr + ")";
+								});
+								totalUploaded += file.size;
+							} catch (err) {
+								if (err.name === 'AbortError') {
+									statusDisplay.innerText = "Upload Cancelled."
+								} else {
+									statusDisplay.innerText = "Error: " + err.message;
+								}
+								isUploading = false
+								document.getElementById('uploadBtn').disabled = false;
+							}
+						}
+						statusDisplay.innerText = "Done! Redirecting...";
+						setTimeout(() => {
+							window.location.href = targetDir;
+						}, 1000);
+					}
+
+					async function uploadFileInChunks(file, onProgress) {
+						const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+						let uploadedBytes = 0;
+
+						for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+							const start = chunkIndex * CHUNK_SIZE;
+							const end = Math.min(start + CHUNK_SIZE, file.size);
+
+							const chunk = file.slice(start, end);
+							const isFinal = (chunkIndex === totalChunks - 1);
+
+							const response = await fetch("/upload?dir="+encodeURIComponent(targetDir), {
+								method: 'POST',
+								headers: {
+									'X-File-Name': file.name,
+									'X-Chunk-Offset': start,
+									'X-Final-Chunk': isFinal,
+									'Content-Type': 'application/octet-stream'
+								},
+								body: chunk,
+								signal: uploadController.signal
+							});
+
+							if (!response.ok) {
+								throw new Error(await response.text())
+							}
+
+							uploadedBytes += (end - start);
+							onProgress(uploadedBytes / file.size);
+						}
+					}
+					function cancelUpload() {
+						if (uploadController) {
+							uploadController.abort();
+						}
+						window.location.href = targetDir
+					}
     </script>
 </body>
 </html>

@@ -78,7 +78,7 @@ func FileServerHandler(baseDir string) http.HandlerFunc {
 			size := ""
 			info, err := entry.Info()
 			if err == nil && !entry.IsDir() {
-				size = fmt.Sprintf("%.2f KB", float64(info.Size())/1024)
+				size = formatSize(info.Size())
 			}
 
 			currentURLPath := filepath.Join(r.URL.Path, entry.Name())
@@ -123,4 +123,17 @@ func FileServerHandler(baseDir string) http.HandlerFunc {
 		 }
 
 	}
+}
+
+func formatSize(b int64) string {
+    const unit = 1024
+    if b < unit {
+        return fmt.Sprintf("%d B", b)
+    }
+    div, exp := int64(unit), 0
+    for n := b / unit; n >= unit; n /= unit {
+        div *= unit
+        exp++
+    }
+    return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
