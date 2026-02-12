@@ -17,6 +17,11 @@ import (
 	"github.com/mdp/qrterminal/v3"
 )
 
+const (
+	certFile = "cert.pem"
+	KeyFile = "key.pem"
+)
+
 func main() {
 	portPtr := flag.String("port", "8080", "The port to run the server on")
 	flag.Parse()
@@ -44,10 +49,10 @@ func main() {
 		defer server.Shutdown()
 	}
 
-	fullURL := fmt.Sprintf("http://%s:%s", ip, *portPtr)
+	fullURL := fmt.Sprintf("https://%s:%s", ip, *portPtr)
 	fmt.Printf("\n--- Server Running ---\n")
 	fmt.Printf("Sharing: %s\n", currentDir)
-	fmt.Printf("On domain: http://fileshare.local:%s\n", *portPtr)
+	fmt.Printf("On domain: https://fileshare.local:%s\n", *portPtr)
 	fmt.Printf("URL: %s\n", fullURL)
 
 	qrterminal.GenerateHalfBlock(fullURL, qrterminal.L, os.Stdout)
@@ -59,5 +64,5 @@ func main() {
 		IdleTimeout: 120 * time.Second,
 	}
 
-	log.Fatal(http.ListenAndServe())
+	log.Fatal(http.ListenAndServeTLS(certFile, KeyFile))
 }
