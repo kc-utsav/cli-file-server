@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fileshare/internal/cleanup"
 	"fileshare/internal/handlers"
 	"fileshare/internal/network"
 	"fileshare/internal/worker"
@@ -29,6 +30,8 @@ func main() {
 	defer downloadPool.Stop()
 
 	currentDir, _ := os.Getwd()
+
+	cleanup.StartCleanupRoutine(currentDir, 24*time.Hour, 1*time.Hour)
 
 	http.HandleFunc("/", handlers.FileServerHandler(currentDir))
 	http.HandleFunc("/upload", handlers.ChunkedUploadHandler())
