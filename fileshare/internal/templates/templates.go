@@ -1,6 +1,11 @@
 // Package templates
 package templates
 
+import _ "embed"
+
+//go:embed script.js
+var UploadScript []byte
+
 const BrowseTpl = `
 <!DOCTYPE html>
 <html>
@@ -143,9 +148,15 @@ const UploadTpl = `
     <div class="container">
         <h1>Upload Files</h1>
         <form id="uploadForm">
-            <div class="upload-zone">
-                <p>📂 Drag files here<br>or tap to browse</p>
+            <div class="upload-options">
+						<div class="upload-zone">
+                <p>Drag files here<br>or tap to browse</p>
                 <input type="file" name="myFiles" id="fileInput" accept="*/*" multiple onchange="updateList()">
+						</div>
+						<div class="upload-zone">
+                <p>Drag folders here<br>or tap to browse</p>
+                <input type="file" name="myFolder" id="folderInput" webkitdirectory multiple onchange="updateList()">
+						</div>
             </div>
 
             <p id="fileCount">No files selected</p>
@@ -162,165 +173,7 @@ const UploadTpl = `
         <div id="status"></div>
         <button type="button" class="cancel-btn" onclick="cancelUpload()">Cancel / Go Back</button>
     </div>
-
-    <script>
-				const CHUNK_SIZE = 4 << 20
-				const PARALLEL_CHUNKS = 8
-
-        const urlParams = new URLSearchParams(window.location.search);
-        const targetDir = urlParams.get('dir') || "/";
-
-				let uploadController = null
-				let isUploading = false
-
-        function formatSize(bytes) {
-            if (bytes === 0) return '0 B';
-            const k = 1024;
-            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-        }
-
-        function updateList() {
-            const input = document.getElementById('fileInput');
-            const list = document.getElementById('file-list');
-            const countLabel = document.getElementById('fileCount');
-
-            if (!input || !list || !countLabel) return;
-
-            countLabel.innerText = input.files.length + " file(s) selected.";
-            list.innerHTML = '';
-
-            if (input.files.length > 0) {
-                for (let i = 0; i < input.files.length; i++) {
-                    const li = document.createElement('li');
-                    li.innerHTML = '<span>' + input.files[i].name + '</span>' + '<span class="count">' + formatSize(input.files[i].size) + '</span>';
-                    list.appendChild(li);
-                }
-            }
-						countLabel.innerText = input.files.length + " file(s) ready.";
-        }
-
-
-        async function uploadFiles() {
-            const input = document.getElementById('fileInput');
-            const files = input.files;
-            const statusDisplay = document.getElementById('status');
-
-            if (files.length === 0) {
-                alert("Please select a file.");
-                return;
-            }
-
-						if (isUploading) return
-						isUploading = true;
-
-						uploadController = new AbortController();
-
-						document.getElementById('uploadBtn').disabled = true;
-						document.getElementById('progress-container').style.display = 'block';
-
-						let totalSize = 0;
-						let totalUploaded = 0;
-
-						for (let i = 0; i < files.length; i++) {
-							totalSize += files[i].size;
-						}
-
-						for (let i = 0; i < files.length; i++) {
-							const file = files[i]
-							statusDisplay.innerText = "Uploading " + file.name + "...";
-
-
-							try {
-								let startTime = Date.now();
-								let previousLoaded = 0;
-								let speedStr = "0 B/s";
-
-								await uploadFileInChunks(file, (fileProgress) => {
-									const currentLoaded = fileProgress * file.size;
-									const now = Date.now()
-									const timeDiff = (now - startTime) / 1000;
-									if (timeDiff > 0.2) {
-										const bytesDiff = currentLoaded - previousLoaded;
-										const speed = bytesDiff / timeDiff;
-										speedStr = formatSize(speed) + "/s";
-
-										startTime = now;
-										previousLoaded = currentLoaded;
-									}
-									const overallProgress = ((totalUploaded + (fileProgress * file.size)) / totalSize) * 100;
-
-									document.getElementById('progress-bar').style.width = overallProgress + '%';
-									statusDisplay.innerText = "Uploading " + file.name + ": " + Math.round(fileProgress * 100) + "% (" + speedStr + ")";
-								});
-								totalUploaded += file.size;
-							} catch (err) {
-								if (err.name === 'AbortError') {
-									statusDisplay.innerText = "Upload Cancelled."
-								} else {
-									statusDisplay.innerText = "Error: " + err.message;
-								}
-								isUploading = false
-								document.getElementById('uploadBtn').disabled = false;
-							}
-						}
-						statusDisplay.innerText = "Done! Redirecting...";
-						setTimeout(() => {
-							window.location.href = targetDir;
-						}, 1000);
-					}
-
-					async function uploadFileInChunks(file, onProgress) {
-						const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-						let uploadedBytes = 0;
-						let chunkIndex = 0
-
-						while (chunkIndex < totalChunks) {
-							const batch = []
-							for (let i = 0; i < PARALLEL_CHUNKS && chunkIndex < totalChunks; i++) {
-								batch.push(uploadChunk(file, chunkIndex, totalChunks));
-								chunkIndex++;
-							}
-							const results = await Promise.all(batch);
-							uploadedBytes += results.reduce((sum, r) => sum + r.bytesWritten, 0);
-							onProgress(uploadedBytes / file.size);
-						}
-					}
-
-					async function uploadChunk(file, chunkIndex, totalChunks) {
-							const start = chunkIndex * CHUNK_SIZE;
-							const end = Math.min(start + CHUNK_SIZE, file.size);
-
-							const chunk = file.slice(start, end);
-							const isFinal = (chunkIndex === totalChunks - 1);
-
-							const response = await fetch("/upload?dir="+encodeURIComponent(targetDir), {
-								method: 'POST',
-								headers: {
-									'X-File-Name': file.name,
-									'X-Chunk-Offset': start,
-									'X-Final-Chunk': isFinal,
-									'Content-Type': 'application/octet-stream'
-								},
-								body: chunk,
-								signal: uploadController.signal
-							});
-
-							if (!response.ok) {
-								throw new Error(await response.text())
-							}
-
-							return { bytesWritten: end - start }
-					}
-
-					function cancelUpload() {
-						if (uploadController) {
-							uploadController.abort();
-						}
-						window.location.href = targetDir
-					}
-    </script>
+		<script src="/static/upload.js"></script>
 </body>
 </html>
 `

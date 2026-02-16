@@ -4,12 +4,14 @@ import (
 	"fileshare/internal/cleanup"
 	"fileshare/internal/handlers"
 	"fileshare/internal/network"
+	"fileshare/internal/templates"
 	"fileshare/internal/worker"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"time"
@@ -19,10 +21,21 @@ import (
 
 const (
 	certFile = "cert.pem"
-	KeyFile = "key.pem"
+	KeyFile  = "key.pem"
 )
 
+func getBinaryDir() string {
+    ex, err := os.Executable()
+    if err != nil {
+        return "."
+    }
+    return filepath.Dir(ex)
+}
+
 func main() {
+	binDir := getBinaryDir()
+	certPath := filepath.Join(binDir, certFile)
+	keyPath := filepath.Join(binDir, KeyFile)
 	portPtr := flag.String("port", "8080", "The port to run the server on")
 	flag.Parse()
 
@@ -42,6 +55,12 @@ func main() {
 	http.HandleFunc("/upload", handlers.ChunkedUploadHandler())
 	http.HandleFunc("/zip", handlers.ZipHandlerFactory(downloadPool))
 
+	// Serve the embedded upload script
+	http.HandleFunc("/static/upload.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Write(templates.UploadScript)
+	})
+
 	ip, iface := network.GetLocalIP()
 	portInt, _ := strconv.Atoi(*portPtr)
 	server, err := network.StartMDNS(portInt, ip, iface)
@@ -58,11 +77,11 @@ func main() {
 	qrterminal.GenerateHalfBlock(fullURL, qrterminal.L, os.Stdout)
 
 	http := &http.Server{
-		Addr: ":" + *portPtr,
-		MaxHeaderBytes: 1 << 20,
+		Addr:              ":" + *portPtr,
+		MaxHeaderBytes:    1 << 20,
 		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout: 120 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
-	log.Fatal(http.ListenAndServeTLS(certFile, KeyFile))
+	log.Fatal(http.ListenAndServeTLS(certPath, keyPath))
 }
